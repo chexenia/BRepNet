@@ -21,10 +21,10 @@ def scale_solid_to_unit_box(solid):
     is_occwl = False
     if isinstance(solid, Solid):
         is_occwl = True
-        topods_solid = solid.topods_solid()
+        topods_shape = solid.topods_shape()
     else:
-        topods_solid = solid
-    bbox = find_box(topods_solid)
+        topods_shape = solid
+    bbox = find_box(topods_shape)
     xmin = 0.0
     xmax = 0.0
     ymin = 0.0
@@ -52,8 +52,8 @@ def scale_solid_to_unit_box(solid):
     trsf_to_apply = scale_trsf.Multiplied(move_to_center)
     
     apply_transform = BRepBuilderAPI_Transform(trsf_to_apply)
-    apply_transform.Perform(topods_solid)
-    transformed_solid = apply_transform.ModifiedShape(topods_solid)
+    apply_transform.Perform(topods_shape)
+    transformed_solid = apply_transform.ModifiedShape(topods_shape)
 
     if is_occwl:
         print("Switch back to occwl solid")

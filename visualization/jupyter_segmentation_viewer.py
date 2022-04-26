@@ -1,4 +1,5 @@
 
+from random import random
 import numpy as np
 import math 
 from OCC.Display.WebGl.jupyter_renderer import JupyterRenderer
@@ -6,7 +7,35 @@ from OCC.Display.WebGl.jupyter_renderer import JupyterRenderer
 from pipeline.entity_mapper import EntityMapper
 
 from occwl.io import load_step
+from occwl.compound import Compound
+from occwl.face import Face
+from OCC.Core.TopoDS import TopoDS_Compound, TopoDS_Shape, TopoDS_Solid, TopoDS_Face
 
+from OCC.Extend.DataExchange import read_step_file_with_names_colors, list_of_shapes_to_compound
+
+
+def load_step_colored(inpath):
+    """
+    Load a STEP file and return a list of faces with colors
+    """
+    shape_dict = read_step_file_with_names_colors(str(inpath))
+
+    shp = []
+    face_dict = dict()
+    for a_shape in shape_dict:
+        l, c = shape_dict[a_shape]
+        if isinstance(a_shape, TopoDS_Solid):
+            shp.append(a_shape)
+        elif isinstance(a_shape, TopoDS_Face):
+            color = [c.Red(), c.Green(), c.Blue()]
+            #color = [random(), 0, 0]
+            face_dict[Face(a_shape)] = color
+
+    if not isinstance(shp, TopoDS_Compound):
+            shp, success = list_of_shapes_to_compound(shp)
+            assert success
+    return list(Compound(shp).solids()), face_dict
+    
 class ColorMap:
     def __init__(self):
         self.color_values = [
@@ -72,10 +101,11 @@ class JupyterSegmentationViewer:
         self.step_folder = step_folder
         assert step_folder.exists()
     
-        solids = self.load_step()
+        solids, faces_dict = self.load_step()
         assert len(solids) == 1, "Expect only 1 solid"
         self.solid = solids[0]
-        self.entity_mapper = EntityMapper(self.solid.topods_solid())
+        self.faces_dict = faces_dict
+        self.entity_mapper = EntityMapper(self.solid.topods_shape())
 
         self.seg_folder = seg_folder
         self.logit_folder = logit_folder
@@ -88,22 +118,44 @@ class JupyterSegmentationViewer:
             [23, 213, 221], # Fillet
             [92, 99, 222],  # Chamfer
             [176, 57, 223], # RevolveSide
-            [238, 61, 178]  # RevolveEnd
+            [238, 61, 178],  # RevolveEnd
+            [176, 57, 100], # CutRevolveSide
+            [138, 61, 178],  # CutRevolveEnd
         ]
+
+        self.seg_dict = {"ExtrudeSide" : 0, 
+            "ExtrudeEnd" : 1,
+            "CutSide" : 2,
+            "CutEnd" : 3,
+            "Fillet" : 4,
+            "Chamfer" : 5,
+            "RevolveSide" : 6,
+            "RevolveEnd" : 7,
+            "CutExtrudeSide" : 2,
+            "CutExtrudeEnd" : 3,
+            "CutRevolveSide" : 8,
+            "CutRevolveEnd" : 9,
+        }
 
         self.color_map = ColorMap()
 
         self.selection_list = []
 
+    def segment_color(self, seg_name):
+        if seg_name in self.seg_dict:
+            return self.format_color(self.bit8_colors[self.seg_dict[seg_name]])
+        else:
+            return self.format_color([0, 0, 0])
+
     def format_color(self, c):
-        return '#%02x%02x%02x' % (c[0], c[1], c[2])
+        return '#%02x%02x%02x' % (int(c[0]), int(c[1]), int(c[2]))
 
     def load_step(self):
         step_filename = self.step_folder / (self.file_stem + ".step")
         if not step_filename.exists():
             step_filename = self.step_folder / (self.file_stem + ".stp")
         assert step_filename.exists()
-        return load_step(step_filename)
+        return load_step_colored(step_filename)
 
     def load_segmentation(self):
         """
@@ -115,6 +167,32 @@ class JupyterSegmentationViewer:
         seg_pathname = self.seg_folder / (self.file_stem + ".seg")
         return np.loadtxt(seg_pathname, dtype=np.uint64)
 
+    def load_segmentation_cc3d(self):
+        """
+        Load the seg file from cc3d
+        """
+        from pandas import read_csv
+
+        assert not self.seg_folder is None,  "Must create this object specifying seg_folder"
+        assert self.seg_folder.exists(), "The segmentation folder provided doesnt exist"
+
+        seg_pathname = self.seg_folder / (self.file_stem + ".seg.csv")
+        data = read_csv(seg_pathname, header=0, index_col=0)
+
+        segs = []
+        for op in data["segment_type"]:
+            if op in self.seg_dict:
+                segs.append(self.seg_dict[op])
+            else:
+                segs.append(-1)
+        return np.asarray(segs, dtype=np.uint64)
+
+    def get_sw_face_index(self, face):
+        """
+        Convert a face color to an index. The index associates indexing of a face in SW api
+        """
+        face_color = self.faces_dict[face]
+        return int(face_color[0] * (len(self.faces_dict)-1))
 
     def load_logits(self):
         """
@@ -139,13 +217,15 @@ class JupyterSegmentationViewer:
         renderer = MultiSelectJupyterRenderer()
         renderer.register_select_callback(self.select_face_callback)
         renderer.DisplayShape(
-            self.solid.topods_solid(), 
+            self.solid.topods_shape(), 
             topo_level="Face", 
             render_edges=True, 
             update=True,
             quality=1.0
         )
 
+    def view_colored_solid(self):
+        self._display_faces_with_colors(self.faces_dict.keys(), self.faces_dict.values())
 
     def view_segmentation(self):
         """
@@ -154,6 +234,14 @@ class JupyterSegmentationViewer:
         face_segmentation = self.load_segmentation()
         self._view_segmentation(face_segmentation)
 
+    def view_segmentation_cc3d(self):
+        """
+        View the initial segmentation of this file
+        """
+        sw_face_segmentation = self.load_segmentation_cc3d()
+        reindexing = [self.get_sw_face_index(face) for face in self.faces_dict.keys()]
+        face_segmentation = sw_face_segmentation[reindexing]
+        self._view_segmentation(face_segmentation)
 
     def view_predicted_segmentation(self):
         """
@@ -162,7 +250,6 @@ class JupyterSegmentationViewer:
         logits = self.load_logits()
         face_segmentation = np.argmax(logits, axis=1)
         self._view_segmentation(face_segmentation)
-
 
     def view_errors_in_segmentation(self):
         """
@@ -241,7 +328,7 @@ class JupyterSegmentationViewer:
     def _view_segmentation(self, face_segmentation):
         colors = []
         for segment in face_segmentation:
-            color = self.format_color(self.bit8_colors[segment])
+            color = self.segment_color(segment)
             colors.append(color)
         self._display_faces_with_colors(self.solid.faces(), colors)
 
