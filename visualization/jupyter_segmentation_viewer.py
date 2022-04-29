@@ -13,8 +13,69 @@ from OCC.Core.TopoDS import TopoDS_Compound, TopoDS_Shape, TopoDS_Solid, TopoDS_
 
 from OCC.Extend.DataExchange import read_step_file_with_names_colors, list_of_shapes_to_compound
 
+def load_step_face_named(filename, as_compound=True):
+    from OCC.Core.STEPControl import (
+        STEPControl_Reader,
+    )
+    from OCC.Core.TopAbs import TopAbs_SOLID, TopAbs_SHELL, TopAbs_COMPOUND
+    from OCC.Core.TopAbs import TopAbs_FACE
+    from OCC.Core.TopExp import TopExp_Explorer
+    from OCC.Core.IFSelect import IFSelect_RetDone, IFSelect_ItemsByEntity
+    from OCC.Core.StepRepr import StepRepr_RepresentationItem as hsr
 
-def load_step_colored(inpath):
+    step_reader = STEPControl_Reader()
+    status = step_reader.ReadFile(filename)
+
+    if status == IFSelect_RetDone:  # check status
+        transfer_result = step_reader.TransferRoots()
+        if not transfer_result:
+            raise AssertionError("Transfer failed.")
+        _nbs = step_reader.NbShapes()
+        if _nbs == 0:
+            raise AssertionError("No shape to transfer.")
+        if _nbs == 1:  # most cases
+            shape = step_reader.Shape(1)
+            tr = step_reader.WS().TransferReader()
+            
+            # Explore the faces of the shape (these are known to be named)
+            exp = TopExp_Explorer(shape, TopAbs_FACE)
+            face_dict = dict()
+            while exp.More():
+                s = exp.Current()
+                exp.Next()
+                item = tr.EntityFromShapeResult(s, -1)
+                if item:
+                    item = hsr.DownCast(item)
+                    name = item.Name().ToCString()
+                    face_dict[Face(s)] = name
+
+                    if name:
+                        print('Found entity named: {}: {}.'.format(name, s))
+                else:
+                    raise RuntimeError(f"Could not find entity for shape{s}")
+
+            return list(Compound(shape).solids()), face_dict
+
+        if _nbs > 1:
+            print("Number of shapes:", _nbs)
+            shps = []
+            # loop over root shapes
+            for k in range(1, _nbs + 1):
+                new_shp = step_reader.Shape(k)
+                if not new_shp.IsNull():
+                    shps.append(new_shp)
+            if as_compound:
+                compound, result = list_of_shapes_to_compound(shps)
+                if not result:
+                    print("Warning: all shapes were not added to the compound")
+                return compound
+            print("Warning, returns a list of shapes.")
+            return shps, None
+    else:
+        raise AssertionError("Error: can't read file.")
+    return None, None
+
+def load_step_face_colored(inpath):
     """
     Load a STEP file and return a list of faces with colors
     """
@@ -24,12 +85,14 @@ def load_step_colored(inpath):
     face_dict = dict()
     for a_shape in shape_dict:
         l, c = shape_dict[a_shape]
+        shp.append(a_shape)
+        face_dict[a_shape] = c
         if isinstance(a_shape, TopoDS_Solid):
             shp.append(a_shape)
         elif isinstance(a_shape, TopoDS_Face):
             color = [c.Red(), c.Green(), c.Blue()]
-            #color = [random(), 0, 0]
-            face_dict[Face(a_shape)] = color
+            f = Face(a_shape)
+            face_dict[f] = color
 
     if not isinstance(shp, TopoDS_Compound):
             shp, success = list_of_shapes_to_compound(shp)
@@ -141,9 +204,9 @@ class JupyterSegmentationViewer:
 
         self.selection_list = []
 
-    def segment_color(self, seg_name):
-        if seg_name in self.seg_dict:
-            return self.format_color(self.bit8_colors[self.seg_dict[seg_name]])
+    def segment_color(self, seg_id):
+        if seg_id in self.seg_dict.values():
+            return self.format_color(self.bit8_colors[seg_id])
         else:
             return self.format_color([0, 0, 0])
 
@@ -155,7 +218,7 @@ class JupyterSegmentationViewer:
         if not step_filename.exists():
             step_filename = self.step_folder / (self.file_stem + ".stp")
         assert step_filename.exists()
-        return load_step_colored(step_filename)
+        return load_step_face_named(str(step_filename))
 
     def load_segmentation(self):
         """
@@ -173,9 +236,6 @@ class JupyterSegmentationViewer:
         """
         from pandas import read_csv
 
-        assert not self.seg_folder is None,  "Must create this object specifying seg_folder"
-        assert self.seg_folder.exists(), "The segmentation folder provided doesnt exist"
-
         seg_pathname = self.seg_folder / (self.file_stem + ".seg.csv")
         data = read_csv(seg_pathname, header=0, index_col=0)
 
@@ -191,8 +251,9 @@ class JupyterSegmentationViewer:
         """
         Convert a face color to an index. The index associates indexing of a face in SW api
         """
-        face_color = self.faces_dict[face]
-        return int(face_color[0] * (len(self.faces_dict)-1))
+        face_name = self.faces_dict[face]
+        decoded = int(face_name.replace("hbz", ""))
+        return decoded
 
     def load_logits(self):
         """
@@ -327,6 +388,7 @@ class JupyterSegmentationViewer:
 
     def _view_segmentation(self, face_segmentation):
         colors = []
+        print(f"num faces {self.solid.num_faces()}")
         for segment in face_segmentation:
             color = self.segment_color(segment)
             colors.append(color)
